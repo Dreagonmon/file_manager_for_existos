@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta charset="utf-8">
+    <meta http-equiv="content-security-policy" content="base-uri 'unsafe-inline' 'self' http:">
+    <meta http-equiv="content-security-policy" content="connect-src http:">
+    <meta name="viewport" content="width=device-width,initial-scale=1.0">
+    <title>File Manager</title>
+    <style>
+        thead,
+        tfoot {
+            background-color: #3f87a6;
+            color: #fff;
+        }
+
+        tbody {
+            background-color: #e4f0f5;
+        }
+
+        table {
+            border-collapse: collapse;
+            border: 2px solid rgb(200, 200, 200);
+            letter-spacing: 1px;
+            font-family: sans-serif;
+            font-size: 0.8rem;
+        }
+
+        td,
+        th {
+            border: 1px solid rgb(190, 190, 190);
+            padding: 5px 10px;
+        }
+
+        td {
+            text-align: center;
+        }
+
+        tr :first-child {
+            text-align: left;
+        }
+
+    </style>
+    <script type="module" src="index.js"></script>
+</head>
+
+<body>
+    <h3>File Manager</h3>
+    <div id="container"></div>
+</body>
+
+</html>

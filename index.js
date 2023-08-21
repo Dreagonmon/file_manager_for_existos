@@ -1,0 +1,459 @@
+import { getErrorMessage } from "./lfs_err.js";
+import {
+    LFS, BlockDevice, MemoryBlockDevice, LFSModule,
+    LFS_O_CREAT, LFS_O_RDONLY, LFS_O_WRONLY, LFS_O_TRUNC,
+    LFS_TYPE_DIR, LFS_TYPE_REG,
+    LFS_ERR_OK,
+} from "./lfs_js.js";
+
+const sleep = (ms) => new Promise(res => setTimeout(res, ms));
+
+/**
+ * download file to local
+ * @param {Uint8Array} data 
+ * @param {string} name 
+ */
+export function saveLocalFile (data, name) {
+    var blob = new Blob([ data.buffer ], {
+        type: "application/octet-stream"
+    });
+    let a = document.createElement("a");
+    a.download = name;
+    a.href = URL.createObjectURL(blob);
+    a.click();
+}
+
+/**
+ * open a local file. may return undefined
+ * @param {string} accept
+ * @param {number} [timeout=30000]
+ * @returns {Promise<Array<File>|undefined>}
+ */
+export function openLocalFile (accept = "*/*", timeout = 300000) {
+    let ip = document.createElement("input");
+    ip.type = "file";
+    ip.accept = accept;
+    return new Promise((resolve) => {
+        let timerId = setTimeout(() => {
+            ip.onchange = undefined;
+            resolve(undefined);
+        }, timeout);
+        ip.onchange = (event) => {
+            clearTimeout(timerId);
+            ip.onchange = undefined;
+            let files = ip.files;
+            if (files.length <= 0) {
+                resolve(undefined);
+                return;
+            }
+            resolve(files);
+        };
+        ip.click();
+    });
+}
+
+/**
+ * Read a file object
+ * @param {File} file
+ * @returns {Promise<Uint8Array>} 
+ */
+const readFile = (file) => {
+    return new Promise((res, rej) => {
+        const reader = new FileReader();
+        reader.onerror = rej;
+        reader.onabort = rej;
+        reader.onloadend = (ev) => {
+            /** @type {ArrayBuffer} */
+            const buffer = reader.result;
+            res(new Uint8Array(buffer));
+        };
+        reader.readAsArrayBuffer(file);
+    });
+};
+
+class SlowMemoryBlockDevice extends BlockDevice {
+    constructor (block_size, block_count) {
+        super();
+        this.read_size = block_size;
+        this.prog_size = block_size;
+        this.block_size = block_size;
+        this.block_count = block_count;
+        this._storage = [];
+    }
+    async read (block, off, buffer, size) {
+        if (this.onread) {
+            if (this.onread(block, off, size) == false) {
+                return 0;
+            }
+        }
+        if (!this._storage[ block ]) {
+            this._storage[ block ] = new Uint8Array(this.block_size);
+        }
+        await sleep(100);
+        LFSModule.HEAPU8.set(
+            new Uint8Array(this._storage[ block ].buffer, off, size),
+            buffer);
+        return 0;
+    }
+    async prog (block, off, buffer, size) {
+        if (this.onprog) {
+            if (this.onprog(block, off, size) == false) {
+                return 0;
+            }
+        }
+        if (!this._storage[ block ]) {
+            this._storage[ block ] = new Uint8Array(this.block_size);
+        }
+        await sleep(100);
+        this._storage[ block ].set(
+            new Uint8Array(LFSModule.HEAPU8.buffer, buffer, size),
+            off);
+        return 0;
+    }
+    async erase (block) {
+        if (this.onerase) {
+            this.onerase(block);
+        }
+        await sleep(100);
+        delete this._storage[ block ];
+        return 0;
+    }
+}
+
+let cwd = "/";
+let bdev = new MemoryBlockDevice(128, 1024);
+let lfs = new LFS(bdev, 100);
+let file_upload_download_size = 256;
+
+const eDiv = (...children) => {
+    const elem = document.createElement("div");
+    for (const child of children) {
+        elem.append(child);
+    }
+    return elem;
+};
+
+const eTd = (...children) => {
+    const elem = document.createElement("td");
+    for (const child of children) {
+        elem.append(child);
+    }
+    return elem;
+};
+
+const eButton = (text, data, onClick) => {
+    const elem = document.createElement("button");
+    elem.innerText = text;
+    elem.dataset[ "data" ] = data;
+    elem.addEventListener("click", onClick);
+    return elem;
+};
+
+const pathJoin = (base, ...parts) => {
+    if (base.endsWith("/")) {
+        base = base.substring(0, base.length - 1);
+    }
+    /** @type {Array<string>} */
+    const partList = base.split("/");
+    for (const part of parts) {
+        if (typeof (part) !== "string" || part.length <= 0 || part === ".") {
+            continue;
+        } else if (part === "..") {
+            partList.pop();
+        } else {
+            partList.push(part);
+        }
+    }
+    if (partList.length <= 1) {
+        return "/";
+    } else {
+        return partList.join("/");
+    }
+};
+
+const renderModePrompt = async (msg, value, onCancel, onConfirm) => {
+    const container = document.querySelector("#container");
+    container.innerHTML = "";
+    container.append(eDiv(msg));
+    const field = document.createElement("input");
+    field.type = "text";
+    field.value = value;
+    container.append(field);
+    container.append(eDiv(
+        eButton("Cancel", null, () => {
+            onCancel();
+        }),
+        eButton("Confirm", null, () => {
+            const inputValue = field.value;
+            onConfirm(inputValue);
+        }),
+    ));
+};
+
+// init user interface
+const renderModeInit = async () => {
+    const container = document.querySelector("#container");
+    container.innerHTML = "";
+    const btn1 = document.createElement("button");
+    btn1.innerText = "Init Filesystem";
+    btn1.addEventListener("click", async () => {
+        bdev = new SlowMemoryBlockDevice(512, 2048);
+        lfs = new LFS(bdev, 100);
+        container.append(eDiv("Mounting filesystem..."));
+        // FIXME: try to mount, not format
+        container.append(eDiv(`format: ${await lfs.format()}`));
+        container.append(eDiv(`mount: ${await lfs.mount()}`));
+        // write test file
+        container.append(eDiv("==== write test file ===="));
+        const file = await lfs.open("/test.txt", LFS_O_WRONLY | LFS_O_CREAT | LFS_O_TRUNC);
+        container.append(eDiv(`open: ${typeof (file) == "number" ? file : "successed."}`));
+        const data = new TextEncoder().encode("Hello 你好 World 世界");
+        const data_size = await file.write(data);
+        container.append(eDiv(`write: ${data_size}`));
+        container.append(eDiv(`tell: ${await file.tell()}`));
+        container.append(eDiv(`sync: ${await file.sync()}`));
+        container.append(eDiv(`close: ${await file.close()}`));
+        container.append(eDiv("==== finished write test file ===="));
+        // container.append(eDiv(eButton("Continue", null, async () => {
+        //     await renderModeList();
+        // })));
+        {
+            await renderModeList();
+        }
+    });
+    container.append(btn1);
+};
+
+// list files
+const renderModeList = async () => {
+    const container = document.querySelector("#container");
+    container.innerHTML = "";
+    const labelCWD = document.createElement("h6");
+    labelCWD.innerText = `CWD: ${cwd}`;
+    container.append(labelCWD);
+    // toolbar
+    container.append(eDiv(
+        eButton("Refresh", cwd, renderModeList),
+        eButton("Up Dir", cwd, async () => {
+            const newCWD = pathJoin(cwd, "..");
+            cwd = newCWD;
+            await renderModeList();
+        }),
+        eButton("Create Dir", cwd, async () => {
+            await renderModePrompt(
+                "Dir path:", cwd, renderModeList,
+                async (path) => {
+                    await renderModeCreateDir(path);
+                },
+            );
+        }),
+        eButton("Upload File", cwd, async () => {
+            const files = await openLocalFile();
+            for (const file of files) {
+                await renderModeUpload(file, cwd);
+            }
+            await renderModeList();
+        }),
+    ));
+    // read dir
+    container.append(document.createElement("hr"));
+    const dir = await lfs.opendir(cwd);
+    if (typeof (dir) === "number") {
+        console.error("opendir:", cwd, dir);
+        return;
+    }
+    const table = document.createElement("table");
+    container.append(table);
+    const tableHeader = document.createElement("thead");
+    table.append(tableHeader);
+    const tableHeaderRow = document.createElement("tr");
+    tableHeader.append(tableHeaderRow);
+    for (const headerName of [ "Filename", "Type", "Size", "Operation" ]) {
+        const header = document.createElement("th");
+        header.innerText = headerName;
+        tableHeaderRow.append(header);
+    }
+    const tableBody = document.createElement("tbody");
+    table.append(tableBody);
+    while (true) {
+        const ent = await dir.read();
+        if (ent === null) {
+            break;
+        }
+        const filename = ent.name;
+        const item = document.createElement("tr");
+        if (ent.type === LFS_TYPE_DIR) {
+            item.append(eTd(filename));
+            item.append(eTd("Dir"));
+            item.append(eTd("--"));
+            if (filename === "." || filename === "..") {
+                continue;
+            }
+            item.append(eTd(
+                eButton("Open", filename, async (e) => {
+                    const newCWD = pathJoin(cwd, e.target.dataset[ "data" ]);
+                    cwd = newCWD;
+                    await renderModeList();
+                }),
+                eButton("Move (Rename)", filename, async (e) => {
+                    const pathFrom = pathJoin(cwd, e.target.dataset[ "data" ]);
+                    await renderModePrompt(
+                        "New path:", pathFrom, renderModeList,
+                        async (pathTo) => {
+                            await renderModeMove(pathFrom, pathTo);
+                        },
+                    );
+                }),
+                eButton("Delete", filename, async (e) => {
+                    await renderModeDelete(pathJoin(cwd, e.target.dataset[ "data" ]));
+                }),
+            ));
+        } else if (ent.type === LFS_TYPE_REG) {
+            item.append(eTd(filename));
+            item.append(eTd("File"));
+            item.append(eTd(ent.size.toString()));
+            item.append(eTd(
+                eButton("Download", filename, async (e) => {
+                    await renderModeDownload(cwd, e.target.dataset[ "data" ]);
+                    await renderModeList();
+                }),
+                eButton("Move (Rename)", filename, async (e) => {
+                    const pathFrom = pathJoin(cwd, e.target.dataset[ "data" ]);
+                    await renderModePrompt(
+                        "New path:", pathFrom, renderModeList,
+                        async (pathTo) => {
+                            await renderModeMove(pathFrom, pathTo);
+                        },
+                    );
+                }),
+                eButton("Delete", filename, async (e) => {
+                    await renderModeDelete(pathJoin(cwd, e.target.dataset[ "data" ]));
+                }),
+            ));
+        } else {
+            continue;
+        }
+        tableBody.append(item);
+    }
+};
+
+/**
+ * Upload a file
+ * @param {File} file 
+ * @param {string} cwd 
+ */
+const renderModeUpload = async (file, cwd) => {
+    const container = document.querySelector("#container");
+    container.innerHTML = "";
+    container.append(eDiv("Uploading..."));
+    const newFilePath = pathJoin(cwd, file.name);
+    const content = await readFile(file);
+    const fileObj = await lfs.open(newFilePath, LFS_O_WRONLY | LFS_O_CREAT | LFS_O_TRUNC);
+    if (typeof (fileObj) === "number") {
+        container.append(eDiv(`Error: ${getErrorMessage(resultCode)}`));
+        container.append(eButton("Back", null, renderModeList));
+        return;
+    }
+    container.append(eDiv(`open: ${newFilePath}`));
+    let offset = 0;
+    while (offset < content.length) {
+        const msg = eDiv(`write: ${offset}/${content.length}`);
+        container.append(msg);
+        const blockSize = Math.min(file_upload_download_size, content.length - offset);
+        const writeSize = await fileObj.write(content.slice(offset, offset + blockSize));
+        container.removeChild(msg);
+        if (writeSize < 0) {
+            container.append(eDiv(`Error: ${getErrorMessage(writeSize)}`));
+            container.append(eButton("Back", null, renderModeList));
+            throw new Error(getErrorMessage(writeSize));
+        }
+        offset += writeSize;
+    }
+    let ret = await fileObj.sync();
+    if (ret < 0) {
+        container.append(eDiv(`Error: ${getErrorMessage(ret)}`));
+        container.append(eButton("Back", null, renderModeList));
+        throw new Error(getErrorMessage(ret));
+    }
+    ret = await fileObj.close();
+    if (ret < 0) {
+        container.append(eDiv(`Error: ${getErrorMessage(ret)}`));
+        container.append(eButton("Back", null, renderModeList));
+        throw new Error(getErrorMessage(ret));
+    }
+};
+
+const renderModeDownload = async (cwd, name) => {
+    const container = document.querySelector("#container");
+    container.innerHTML = "";
+    container.append(eDiv("Downloading..."));
+    const filePath = pathJoin(cwd, name);
+    const fileObj = await lfs.open(filePath, LFS_O_RDONLY);
+    if (typeof (fileObj) === "number") {
+        container.append(eDiv(`Error: ${getErrorMessage(resultCode)}`));
+        container.append(eButton("Back", null, renderModeList));
+        return;
+    }
+    container.append(eDiv(`open: ${filePath}`));
+    const contentSize = await fileObj.size();
+    const buffer = new Uint8Array(contentSize);
+    let offset = 0;
+    while (offset < contentSize) {
+        const msg = eDiv(`read: ${offset}/${contentSize}`);
+        container.append(msg);
+        const blockSize = Math.min(file_upload_download_size, contentSize - offset);
+        const data = await fileObj.read(blockSize);
+        container.removeChild(msg);
+        if (typeof (data) === "number") {
+            container.append(eDiv(`Error: ${getErrorMessage(data)}`));
+            container.append(eButton("Back", null, renderModeList));
+            throw new Error(getErrorMessage(data));
+        }
+        buffer.set(data, offset);
+        offset += data.length;
+    }
+    saveLocalFile(buffer, name);
+};
+
+const renderModeCreateDir = async (path) => {
+    const container = document.querySelector("#container");
+    container.innerHTML = "";
+    container.append(eDiv("Creating dir..."));
+    const resultCode = await lfs.mkdir(path);
+    if (resultCode !== LFS_ERR_OK) {
+        container.append(eDiv(`Error: ${getErrorMessage(resultCode)}`));
+        container.append(eButton("Back", null, renderModeList));
+    } else {
+        await renderModeList();
+    }
+};
+
+const renderModeDelete = async (path) => {
+    const container = document.querySelector("#container");
+    container.innerHTML = "";
+    container.append(eDiv("Deleting..."));
+    const resultCode = await lfs.remove(path);
+    if (resultCode !== LFS_ERR_OK) {
+        container.append(eDiv(`Error: ${getErrorMessage(resultCode)}`));
+        container.append(eButton("Back", null, renderModeList));
+    } else {
+        await renderModeList();
+    }
+};
+
+const renderModeMove = async (pathFrom, pathTo) => {
+    const container = document.querySelector("#container");
+    container.innerHTML = "";
+    container.append(eDiv("Moving..."));
+    const resultCode = await lfs.rename(pathFrom, pathTo);
+    if (resultCode !== LFS_ERR_OK) {
+        container.append(eDiv(`Error: ${getErrorMessage(resultCode)}`));
+        container.append(eButton("Back", null, renderModeList));
+    } else {
+        await renderModeList();
+    }
+};
+
+window.addEventListener("load", async () => {
+    await renderModeInit();
+});
