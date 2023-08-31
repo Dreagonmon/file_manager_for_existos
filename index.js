@@ -120,6 +120,56 @@ class SlowMemoryBlockDevice extends BlockDevice {
     }
 }
 
+class HttpBlockDevice extends BlockDevice {
+    constructor(uri) {
+        super();
+        this.read_size = 2048;
+        this.prog_size = 2048;
+        this.block_size = (2048) * 64;
+        this.block_count = 1024 - 48;
+        this.uri = uri; 
+    }
+    async read(block, off, buffer, size) {
+        await fetch(this.uri + '/nandread_block=' + block + '_off=' + off + '_size=' + size).then(
+            response => {
+                return response.arrayBuffer()
+            }).then(res => {
+                //console.log(res);
+                if(res.byteLength < 10)
+                {
+                    var s = String.fromCharCode(null, new Uint8Array(res));
+                    console.log(s);
+                    return LFS_ERR_CORRUPT;
+                }
+                LFSModule.HEAPU8.set(
+                new Uint8Array(res),
+                buffer);
+            })
+        return 0;
+    }
+    async prog(block, off, buffer, size) {
+        var dat = new Uint8Array(LFSModule.HEAPU8.buffer, buffer, size);
+
+        await fetch(this.uri + '/nandwrite_block=' + block + '_off=' + off + '_size=' + size, 
+            {
+                method: 'POST', 
+                body: dat
+            }).then(function(data){
+                //console.log(data);
+            })
+        return 0;
+    }
+    async erase(block) {
+        await fetch(this.uri + '/nanderase_block=' + block).then(
+            response => {
+                return response.arrayBuffer()
+            }).then(res => {
+                //console.log(res);
+            })
+        return 0;
+    }
+}
+
 let cwd = "/";
 let bdev = new MemoryBlockDevice(128, 1024);
 let lfs = new LFS(bdev, 100);
