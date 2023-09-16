@@ -1,5 +1,7 @@
 # file_manager_for_existos
 
+# Archived, Merged into ExistOS!!
+
 需要修改的地方:
 * index.js
 
